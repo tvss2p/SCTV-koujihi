@@ -70,9 +70,29 @@ async function decryptWithKey(key) {
     b64ToBytes(DATA)
   );
   const html = new TextDecoder().decode(plain);
-  document.open();
-  document.write(html);
-  document.close();
+  // document.write() はページ読み込み完了後（非同期処理の後）に呼ぶと文書全体を
+  // 置き換えない場合があり、パスワード画面の下に復号後の内容が残ってしまう。
+  // DOM操作でhead/bodyを完全に入れ替えることで確実にパスワード画面を除去する。
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  if (parsed.title) document.title = parsed.title;
+  document.head.innerHTML = "";
+  document.body.innerHTML = "";
+  Array.from(parsed.head.children).forEach(node => {
+    document.head.appendChild(document.importNode(node, true));
+  });
+  Array.from(parsed.body.children).forEach(node => {
+    if (node.tagName === "SCRIPT") {
+      const s = document.createElement("script");
+      Array.from(node.attributes).forEach(a => s.setAttribute(a.name, a.value));
+      s.textContent = node.textContent;
+      document.body.appendChild(s);
+      // アプリのスクリプトは "DOMContentLoaded" 内で初期化処理を行うが、この時点では
+      // 既にそのイベントは発火済みのため、リスナー登録後に手動で再発火させて初期化する。
+      document.dispatchEvent(new Event("DOMContentLoaded", {bubbles:true, cancelable:true}));
+    } else {
+      document.body.appendChild(document.importNode(node, true));
+    }
+  });
 }
 
 async function tryStored() {
