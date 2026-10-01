@@ -16,7 +16,7 @@ const SHEET_NAMES = {
   log: "更新履歴"
 };
 
-const GENRES = { stb: "STB関連", remote: "リモコン", net: "ONU・その他" };
+const GENRES = { stb: "STB関連", remote: "リモコン", net: "ONU・その他", camera: "防犯カメラ" };
 
 const PASSWORD_PROPERTY = "ADMIN_PASSWORD_SHA256";
 const MAX_FAILURES = 10;          // この回数パスワードを間違えると
