@@ -1,7 +1,7 @@
 /**
  * SCTV工事費判定ツール 設定保存用 Google Apps Script
  *
- * スプレッドシートに「工事費単価」「機器」「追加工事項目」「更新履歴」の各シートを作り、
+ * スプレッドシートに「工事費単価」「機器」「追加工事項目」「確認記録」「更新履歴」の各シートを作り、
  * 工事費判定ツールの管理者ページから保存された設定を読み書きする。
  * 管理者パスワードはコードに書かず、メニュー「工事費ツール ＞ 管理者パスワードを設定」から
  * 登録した値の SHA-256 ハッシュをスクリプトプロパティに保存して照合する。
@@ -13,6 +13,7 @@ const SHEET_NAMES = {
   rates: "工事費単価",
   devices: "機器",
   extras: "追加工事項目",
+  notes: "確認記録",
   log: "更新履歴"
 };
 
@@ -23,6 +24,7 @@ const MAX_FAILURES = 10;          // この回数パスワードを間違える�
 const LOCK_SECONDS = 10 * 60;     // この秒数、保存を受け付けない
 const MAX_ROWS = 500;
 const MAX_TEXT = 80;
+const MAX_NOTE = 400;             // 確認記録の内容の最大文字数
 
 // ===== スプレッドシートのメニュー =====
 
@@ -135,8 +137,19 @@ function readConfig_() {
     rate: toFee_(r[3])
   }));
 
+  // 確認記録（ルールの根拠）。シートが無い場合は null を返し、ツール側の初期値を使う。
+  const notesSheet = ss.getSheetByName(SHEET_NAMES.notes);
+  const notes = notesSheet ? dataRows_(notesSheet).map(r => ({
+    id: String(r[0]).trim(),
+    date: r[1] instanceof Date
+      ? Utilities.formatDate(r[1], Session.getScriptTimeZone(), "yyyy-MM-dd")
+      : String(r[1]).trim().replace(/\//g, "-"),
+    by: String(r[2]).trim(),
+    text: String(r[3]).trim()
+  })) : null;
+
   const updatedAt = PropertiesService.getScriptProperties().getProperty("UPDATED_AT");
-  return { empty: false, config: { rates: rates, devices: devices, extras: extras }, updatedAt: updatedAt };
+  return { empty: false, config: { rates: rates, devices: devices, extras: extras, notes: notes }, updatedAt: updatedAt };
 }
 
 function writeConfig_(config) {
@@ -147,6 +160,10 @@ function writeConfig_(config) {
     config.devices.map(d => [d.value, d.label, GENRES[d.genre], d.rate]), [1, 2], 4);
   writeSheet_(ss, SHEET_NAMES.extras, ["ID（変更しないでください）", "項目名", "単位", "単価（税込）"],
     config.extras.map(x => [x.id, x.label, x.unit, x.rate]), [1, 2, 3], 4);
+  if (config.notes) {
+    writeSheet_(ss, SHEET_NAMES.notes, ["ID（変更しないでください）", "確認日", "確認した相手", "内容"],
+      config.notes.map(n => [n.id, n.date, n.by, n.text]), [1, 2, 3, 4], 0);
+  }
 
   const now = new Date();
   PropertiesService.getScriptProperties().setProperty("UPDATED_AT", now.toISOString());
@@ -158,10 +175,11 @@ function writeConfig_(config) {
     log.setFrozenRows(1);
   }
   log.appendRow([now, "管理者ページから保存（単価" + config.rates.length + "件・機器" +
-    config.devices.length + "件・追加工事項目" + config.extras.length + "件）"]);
+    config.devices.length + "件・追加工事項目" + config.extras.length + "件" +
+    (config.notes ? "・確認記録" + config.notes.length + "件" : "") + "）"]);
 }
 
-// シートの中身を丸ごと書き換える。textCols は文字列として扱う列（1始まり）、feeCol は金額列。
+// シートの中身を丸ごと書き換える。textCols は文字列として扱う列（1始まり）、feeCol は金額列（0 なら無し）。
 function writeSheet_(ss, name, header, rows, textCols, feeCol) {
   const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
   sheet.clearContents();
@@ -169,7 +187,7 @@ function writeSheet_(ss, name, header, rows, textCols, feeCol) {
   textCols.forEach(c => sheet.getRange(1, c, values.length, 1).setNumberFormat("@"));
   sheet.getRange(1, 1, values.length, header.length).setValues(values);
   sheet.getRange(1, 1, 1, header.length).setFontWeight("bold").setBackground("#e7f1fb");
-  if (rows.length) sheet.getRange(2, feeCol, rows.length, 1).setNumberFormat("#,##0");
+  if (rows.length && feeCol) sheet.getRange(2, feeCol, rows.length, 1).setNumberFormat("#,##0");
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, header.length);
 }
@@ -209,10 +227,23 @@ function validateConfig_(c) {
     id: text(x && x.id, "追加工事項目のID"), label: text(x && x.label, "追加工事項目の名称"),
     unit: text(x && x.unit, "追加工事項目の単位"), rate: fee(x && x.rate, "追加工事項目")
   }));
+  // 確認記録は古いツールからの保存では送られないため、無い場合はシートを書き換えない。
+  let notes = null;
+  if (c.notes !== undefined && c.notes !== null) {
+    notes = list(c.notes, "確認記録").map(n => {
+      const date = text(n && n.date, "確認記録の確認日");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("確認記録の確認日が正しくありません。");
+      const body = typeof (n && n.text) === "string" ? n.text.trim() : "";
+      if (!body) throw new Error("確認記録の内容が空です。");
+      if (body.length > MAX_NOTE) throw new Error("確認記録の内容が長すぎます（" + MAX_NOTE + "文字まで）。");
+      return { id: text(n.id, "確認記録のID"), date: date, by: text(n.by, "確認した相手"), text: body };
+    });
+    unique(notes.map(n => n.id), "確認記録");
+  }
   unique(rates.map(r => r.key), "工事費単価");
   unique(devices.map(d => d.value), "機器");
   unique(extras.map(x => x.id), "追加工事項目");
-  return { rates: rates, devices: devices, extras: extras };
+  return { rates: rates, devices: devices, extras: extras, notes: notes };
 }
 
 // ===== ユーティリティ =====
